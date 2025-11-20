@@ -1,63 +1,73 @@
+import sys
+import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import subprocess
-import os
-import sys
 import shutil
 import threading
 import time
 
-# --- Import tkinterdnd2 for Drag and Drop ---
+# --- CONFIGURATION & SETUP ---
+
+# 1. Determine Application Directory (Robust for EXE and Script)
+if getattr(sys, 'frozen', False):
+    # Running as PyInstaller EXE
+    APP_DIR = os.path.dirname(sys.executable)
+    if hasattr(sys, '_MEIPASS'):
+        SCRIPT_DIR = sys._MEIPASS # Internal temp dir for bundled files
+    else:
+        SCRIPT_DIR = APP_DIR
+else:
+    # Running as Python Script
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    SCRIPT_DIR = APP_DIR
+
+DIFF_PDF_DIR = os.path.join(SCRIPT_DIR, 'diff-pdf-bin')
+DIFF_PDF_COMMAND = os.path.join(DIFF_PDF_DIR, 'diff-pdf.exe')
+
+# 2. Debug Logging (Writes to the folder where the EXE lives)
+def log_debug(msg):
+    try:
+        log_path = os.path.join(APP_DIR, "debug_args.txt")
+        with open(log_path, "a") as f:
+            f.write(f"{msg}\n")
+    except:
+        pass
+
+# Log every startup args
+log_debug(f"STARTUP ARGS: {sys.argv}")
+
+# --- Import tkinterdnd2 ---
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
 except ImportError:
     TkinterDnD = None
 
-# --- Configuration ---
-try:
-    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        SCRIPT_DIR = sys._MEIPASS
-    else:
-        SCRIPT_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
-except Exception:
-    SCRIPT_DIR = os.path.abspath(os.path.dirname(__file__))
-    
-DIFF_PDF_DIR = os.path.join(SCRIPT_DIR, 'diff-pdf-bin')
-DIFF_PDF_COMMAND = os.path.join(DIFF_PDF_DIR, 'diff-pdf.exe')
 
 # --- 3D VIEWER LOGIC (Run in subprocess) ---
 def run_3d_viewer_mode(file_a, file_b, save_dir):
-    """
-    This function is called when the EXE runs in '3D Mode'.
-    It imports PyVista/Diff3D and runs the interactive viewer.
-    """
     try:
+        log_debug("Starting 3D Viewer Mode...")
         import pyvista as pv
         import vtk
         import diff3d
 
-        # Force interactive mode
         pv.global_theme.interactive = True
-        
         target_image_name = "screenshot.png"
         
-        # --- MONKEY PATCH: Intercept show() to add callbacks ---
+        # Monkey Patch show() for auto-screenshot
         OriginalShow = pv.Plotter.show
 
         def patched_show(self, *args, **kwargs):
-            # Define the screenshot function
             def auto_capture(*_):
                 try:
-                    # Take screenshot (blocking=False helps performance)
                     self.screenshot(target_image_name, return_img=False)
                 except:
                     pass
 
-            # 1. Add Observer for Mouse Release (EndInteractionEvent)
             if hasattr(self, 'iren') and self.iren:
                 self.iren.add_observer(vtk.vtkCommand.EndInteractionEvent, auto_capture)
 
-            # 2. Capture immediately on render
             try:
                 self.render()
                 auto_capture()
@@ -67,21 +77,20 @@ def run_3d_viewer_mode(file_a, file_b, save_dir):
             return OriginalShow(self, *args, **kwargs)
 
         pv.Plotter.show = patched_show
-        # -------------------------------------------------------
 
-        # Ensure we are in the correct directory to save the screenshot
+        # Change dir to save_dir so screenshot saves there
         os.chdir(save_dir)
         
-        # Remove old screenshot if exists
         if os.path.exists(target_image_name):
             os.remove(target_image_name)
 
+        log_debug(f"Diffing: {file_a} vs {file_b}")
         diff3d.from_files(file_a, file_b)
         
     except Exception as e:
-        # Write error to a log file since we have no console in windowed mode
+        log_debug(f"3D CRASH: {e}")
         with open(os.path.join(save_dir, "diff3d_error.log"), "w") as f:
-            f.write(str(e))
+            f.write(f"Error running 3D viewer: {str(e)}")
         sys.exit(1)
 
 # --- GUI LOGIC ---
@@ -92,81 +101,52 @@ class DiffPDFApp:
         master.geometry("600x500")
         master.resizable(False, False)
 
-        # File path variables
         self.file_a_path = tk.StringVar()
         self.file_b_path = tk.StringVar()
-        
-        # Checkbox variable (Default to True)
         self.check_3d_var = tk.BooleanVar(value=True)
 
-        # Apply style
         self.style = ttk.Style()
         self.style.theme_use('vista') 
         self.style.configure('TFrame', background='#f0f0f0')
         self.style.configure('TLabel', background='#f0f0f0', font=('Segoe UI', 10))
         self.style.configure('TCheckbutton', background='#f0f0f0', font=('Segoe UI', 10))
-        
         self.style.configure('Accent.TButton', background='#9B84D3', foreground='black', font=('Segoe UI', 12, 'bold'))
         self.style.map('Accent.TButton', 
                        background=[('active', '#8C74C2'), ('pressed', '#7E65B1')],
                        foreground=[('active', 'black'), ('pressed', 'black')])
 
-        # Main Frame
         main_frame = ttk.Frame(master, padding="30 20 30 20")
         main_frame.pack(expand=True, fill='both')
 
-        # Title
-        title_label = ttk.Label(main_frame, text="PDF & 3D Difference Finder", 
-                                font=('Segoe UI', 16, 'bold'))
+        title_label = ttk.Label(main_frame, text="PDF & 3D Difference Finder", font=('Segoe UI', 16, 'bold'))
         title_label.grid(row=0, column=0, pady=(0, 25), sticky='w')
 
-        # --- File 1 Drop Zone ---
         self.create_drop_zone(main_frame, "File 1 (Original):", self.file_a_path, 1)
-
-        # --- File 2 Drop Zone ---
         self.create_drop_zone(main_frame, "File 2 (Comparison):", self.file_b_path, 2)
 
-        # --- 3D Checkbox ---
-        self.check_3d = ttk.Checkbutton(main_frame, 
-                                        text="Auto-diff matching .STEP files (requires 'diff3d' & 'build123d')", 
-                                        variable=self.check_3d_var,
-                                        onvalue=True, offvalue=False)
+        self.check_3d = ttk.Checkbutton(main_frame, text="Auto-diff matching .STEP files (requires 'diff3d' & 'build123d')", 
+                                        variable=self.check_3d_var, onvalue=True, offvalue=False)
         self.check_3d.grid(row=3, column=0, pady=(15, 5), sticky='w')
 
-        # --- Run Button ---
-        self.run_button = ttk.Button(main_frame, text="COMPARE FILES", command=self.run_diff, 
-                                     style='Accent.TButton', width=25)
+        self.run_button = ttk.Button(main_frame, text="COMPARE FILES", command=self.run_diff, style='Accent.TButton', width=25)
         self.run_button.grid(row=4, column=0, pady=(20, 5))
 
-        # --- Status Label ---
         self.status_label = ttk.Label(main_frame, text="Ready. Drag files above.", foreground='#666', font=('Segoe UI', 10))
         self.status_label.grid(row=5, column=0, pady=(5, 0))
 
-        # Grid weight
         main_frame.grid_columnconfigure(0, weight=1)
 
     def create_drop_zone(self, parent, title, path_var, row_idx):
         container = ttk.Frame(parent)
         container.grid(row=row_idx, column=0, sticky='ew', pady=10)
         container.grid_columnconfigure(0, weight=1)
-
         ttk.Label(container, text=title, font=('Segoe UI', 10, 'bold'), foreground="#333").grid(row=0, column=0, sticky='w', padx=2, pady=(0, 5))
+        
+        bg_normal, bg_hover, bg_selected = "#E8EAF6", "#D1C4E9", "#E0F2F1"
+        fg_normal, fg_selected = "#5C6BC0", "#00695C"
 
-        bg_normal = "#E8EAF6"
-        bg_hover = "#D1C4E9"
-        bg_selected = "#E0F2F1"
-        fg_normal = "#5C6BC0"
-        fg_selected = "#00695C"
-
-        drop_zone = tk.Label(container, 
-                             text="☁  Drag & Drop PDF Here", 
-                             bg=bg_normal, 
-                             fg=fg_normal,
-                             font=('Segoe UI', 11),
-                             relief="groove", 
-                             borderwidth=2,
-                             height=3,
-                             cursor="hand2")
+        drop_zone = tk.Label(container, text="☁  Drag & Drop PDF Here", bg=bg_normal, fg=fg_normal, 
+                             font=('Segoe UI', 11), relief="groove", borderwidth=2, height=3, cursor="hand2")
         drop_zone.grid(row=1, column=0, sticky='ew')
 
         def update_ui(*args):
@@ -178,174 +158,121 @@ class DiffPDFApp:
                 self.status_label.config(text="Ready to compare.", foreground='#666', font=('Segoe UI', 10))
             else:
                 drop_zone.config(text="☁  Drag & Drop PDF Here", bg=bg_normal, fg=fg_normal, font=('Segoe UI', 11))
-
         path_var.trace_add("write", update_ui)
-
-        def on_click(event):
-            self.select_file(path_var)
-        drop_zone.bind("<Button-1>", on_click)
+        drop_zone.bind("<Button-1>", lambda e: self.select_file(path_var))
 
         if TkinterDnD:
             drop_zone.drop_target_register(DND_FILES)
-            def on_drop(event):
-                files = self.master.tk.splitlist(event.data)
-                if files: path_var.set(files[0])
-            
-            def on_enter(event):
-                if not path_var.get(): drop_zone.config(bg=bg_hover)
-
-            def on_leave(event):
-                if not path_var.get(): drop_zone.config(bg=bg_normal)
-
-            drop_zone.dnd_bind('<<Drop>>', on_drop)
-            drop_zone.dnd_bind('<<DragEnter>>', on_enter)
-            drop_zone.dnd_bind('<<DragLeave>>', on_leave)
+            drop_zone.dnd_bind('<<Drop>>', lambda e: path_var.set(self.master.tk.splitlist(e.data)[0]) if self.master.tk.splitlist(e.data) else None)
+            drop_zone.dnd_bind('<<DragEnter>>', lambda e: drop_zone.config(bg=bg_hover) if not path_var.get() else None)
+            drop_zone.dnd_bind('<<DragLeave>>', lambda e: drop_zone.config(bg=bg_normal) if not path_var.get() else None)
 
     def select_file(self, path_var):
-        filepath = filedialog.askopenfilename(
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
-            title="Select a PDF File"
-        )
+        filepath = filedialog.askopenfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
         if filepath: path_var.set(filepath)
 
     def find_step_file(self, pdf_path):
         if not pdf_path: return None
         base_path = os.path.splitext(pdf_path)[0]
         for ext in ['.step', '.stp', '.STEP', '.STP']:
-            candidate = base_path + ext
-            if os.path.exists(candidate):
-                return candidate
+            if os.path.exists(base_path + ext): return base_path + ext
         return None
 
     def run_diff(self):
-        file_a = self.file_a_path.get()
-        file_b = self.file_b_path.get()
-
+        file_a, file_b = self.file_a_path.get(), self.file_b_path.get()
         if not file_a or not file_b:
             self.status_label.config(text="⚠️ Please select both PDF files first.", foreground='red')
             return
-
-        output_path = filedialog.asksaveasfilename(
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf")],
-            title="Save the Difference PDF as...",
-            initialfile="diff_result.pdf"
-        )
-
-        if not output_path:
-            self.status_label.config(text="Save cancelled.", foreground='#666')
-            return
+        output_path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")], initialfile="diff_result.pdf")
+        if not output_path: return
 
         self.status_label.config(text="Processing...", foreground='#9B84D3', font=('Segoe UI', 10, 'italic'))
-        self.master.update() 
+        self.master.update()
 
         # 1. PDF Diff
         pdf_success = False
-        command = [
-            DIFF_PDF_COMMAND,
-            f'--output-diff={os.path.normpath(output_path)}', 
-            os.path.normpath(file_b), 
-            os.path.normpath(file_a)
-        ]
-        
         try:
-            result = subprocess.run(
-                command, capture_output=True, text=True, check=False, cwd=DIFF_PDF_DIR, 
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            )
-            if result.returncode in [0, 1]:
-                pdf_success = True
-            else:
-                error_msg = result.stderr or result.stdout or "Unknown Error"
-                if result.returncode in [2, 3] or "Error opening" in error_msg:
-                     messagebox.showerror("Blocked", f"Could not write PDF.\nPlease whitelist 'pdf-diff-gui.exe'.\n\nDetails: {error_msg}")
-                else:
-                     print(f"PDF Diff Failed: {error_msg}")
-        except Exception as e:
-            print(f"PDF Execution Exception: {e}")
+            cmd = [DIFF_PDF_COMMAND, f'--output-diff={os.path.normpath(output_path)}', os.path.normpath(file_b), os.path.normpath(file_a)]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=DIFF_PDF_DIR, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+            if res.returncode in [0, 1]: pdf_success = True
+            elif res.returncode in [2, 3] or "Error opening" in res.stderr:
+                messagebox.showerror("Blocked", f"Could not write PDF.\nPlease whitelist 'pdf-diff-gui.exe'.\n\nDetails: {res.stderr}")
+        except Exception as e: print(f"PDF Error: {e}")
 
-        # 2. 3D STEP Diff (Using Self-Call Logic)
+        # 2. 3D Diff
+        step_msg = ""
         if self.check_3d_var.get():
-            step_a = self.find_step_file(file_a)
-            step_b = self.find_step_file(file_b)
-            
+            step_a, step_b = self.find_step_file(file_a), self.find_step_file(file_b)
             if step_a and step_b:
                 save_dir = os.path.dirname(output_path)
-                target_image_name = os.path.splitext(os.path.basename(output_path))[0] + ".png"
-                target_image_path = os.path.join(save_dir, target_image_name)
-
-                # Check if we can actually run 3D (check imports via subprocess self-check)
+                target_img = os.path.join(save_dir, os.path.splitext(os.path.basename(output_path))[0] + ".png")
+                
+                # CRITICAL FIX: Only run library check via subprocess if NOT frozen
                 diff3d_ok = False
-                try:
-                     subprocess.run([sys.executable, "-c", "import diff3d; import pyvista; import build123d"], 
-                                    check=True, capture_output=True, 
-                                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+                if getattr(sys, 'frozen', False):
+                     # In EXE mode, libraries are packaged. Skip subprocess check to avoid spawning duplicate GUI.
                      diff3d_ok = True
-                except Exception:
-                     diff3d_ok = False
+                else:
+                    # In script mode, check if libraries exist
+                    try:
+                        subprocess.run([sys.executable, "-c", "import diff3d, pyvista, build123d"], check=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+                        diff3d_ok = True
+                    except: 
+                        diff3d_ok = False
 
                 if diff3d_ok:
-                    # Launch 3D viewer in background
-                    def run_3d_process():
+                    def run_3d():
                         try:
-                            # Construct the command based on execution environment
+                            # Use a strict flag --run-3d-viewer
                             if getattr(sys, 'frozen', False):
-                                # Running as EXE: Call self
-                                cmd = [sys.executable, "--3d-mode", step_a, step_b, save_dir]
+                                cmd = [sys.executable, "--run-3d-viewer", step_a, step_b, save_dir]
                             else:
-                                # Running as Script: Call python executable + script path
-                                script_path = os.path.abspath(sys.argv[0])
-                                cmd = [sys.executable, script_path, "--3d-mode", step_a, step_b, save_dir]
-                                
+                                cmd = [sys.executable, os.path.abspath(__file__), "--run-3d-viewer", step_a, step_b, save_dir]
+                            
                             subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
                             
-                            # Check for result 'screenshot.png'
-                            default_screenshot = os.path.join(save_dir, "screenshot.png")
-                            if os.path.exists(default_screenshot):
-                                if os.path.exists(target_image_path):
-                                    os.remove(target_image_path)
-                                os.rename(default_screenshot, target_image_path)
-                                
-                                self.master.after(0, lambda: self.status_label.config(
-                                    text=f"✔ PDF & 3D Image Saved.", foreground='green'))
+                            default_ss = os.path.join(save_dir, "screenshot.png")
+                            if os.path.exists(default_ss):
+                                if os.path.exists(target_img): os.remove(target_img)
+                                os.rename(default_ss, target_img)
+                                self.master.after(0, lambda: self.status_label.config(text=f"✔ PDF & 3D Image Saved.", foreground='green'))
                             else:
-                                self.master.after(0, lambda: self.status_label.config(
-                                    text=f"✔ PDF Saved (3D: No screenshot).", foreground='green'))
-                                
-                        except Exception as e:
-                            print(f"3D Process Error: {e}")
+                                self.master.after(0, lambda: self.status_label.config(text=f"✔ PDF Saved (3D: No capture).", foreground='green'))
+                        except Exception as e: print(f"3D Error: {e}")
 
-                    threading.Thread(target=run_3d_process, daemon=True).start()
+                    threading.Thread(target=run_3d, daemon=True).start()
                     self.status_label.config(text="3D View Open... Rotate to Auto-Save...", foreground='#9B84D3')
-                    return 
+                    return
+                else: messagebox.showwarning("Missing Library", "Please run: pip install diff3d build123d pyvista")
 
-                else:
-                    messagebox.showwarning("Missing Library", "3D diff requested but libraries not found.\nPlease run: pip install diff3d build123d pyvista")
-
-        if pdf_success:
-            self.status_label.config(text=f"✔ PDF Saved.", foreground='green', font=('Segoe UI', 10, 'bold'))
-        else:
-            self.status_label.config(text=f"✘ PDF Failed.", foreground='red', font=('Segoe UI', 10, 'bold'))
+        if pdf_success: self.status_label.config(text=f"✔ PDF Saved.", foreground='green', font=('Segoe UI', 10, 'bold'))
+        else: self.status_label.config(text=f"✘ PDF Failed.", foreground='red', font=('Segoe UI', 10, 'bold'))
 
 def main():
-    # --- INTERNAL DISPATCHER for 3D MODE ---
-    # Check if we are being called as a 3D viewer subprocess
-    # If calling as script, argv[0] is script.py, so flags start at index 1
-    # If calling as EXE, argv[0] is exe path, flags start at index 1
-    if len(sys.argv) >= 2 and sys.argv[1] == "--3d-mode":
-        if len(sys.argv) == 5:
-            file_a = sys.argv[2]
-            file_b = sys.argv[3]
-            save_dir = sys.argv[4]
-            run_3d_viewer_mode(file_a, file_b, save_dir)
-            sys.exit(0)
-    
-    # --- GUI MODE (Normal Start) ---
-    if TkinterDnD:
-        root = TkinterDnD.Tk()
-    else:
-        root = tk.Tk()
+    # --- INTERNAL DISPATCHER (Strict Flag Check) ---
+    if "--run-3d-viewer" in sys.argv:
+        try:
+            log_debug("Found 3D flag. Entering 3D logic.")
+            idx = sys.argv.index("--run-3d-viewer")
+            # Validate we have enough arguments
+            if len(sys.argv) > idx + 3:
+                file_a = sys.argv[idx + 1]
+                file_b = sys.argv[idx + 2]
+                save_dir = sys.argv[idx + 3]
+                run_3d_viewer_mode(file_a, file_b, save_dir)
+            else:
+                log_debug(f"ERROR: Not enough args after flag. Args: {sys.argv}")
+
+        except Exception as e:
+            log_debug(f"DISPATCH ERROR: {e}")
+        
+        # CRITICAL: Always exit here if flag was present, even if logic failed.
+        # This prevents the GUI from spawning recursively.
+        sys.exit(0) 
+
+    # --- GUI MODE ---
+    if TkinterDnD: root = TkinterDnD.Tk()
+    else: root = tk.Tk()
     app = DiffPDFApp(root)
     root.mainloop()
 
