@@ -25,6 +25,66 @@ except Exception:
 DIFF_PDF_DIR = os.path.join(SCRIPT_DIR, 'diff-pdf-bin')
 DIFF_PDF_COMMAND = os.path.join(DIFF_PDF_DIR, 'diff-pdf.exe')
 
+# --- 3D VIEWER LOGIC (Run in subprocess) ---
+def run_3d_viewer_mode(file_a, file_b, save_dir):
+    """
+    This function is called when the EXE runs in '3D Mode'.
+    It imports PyVista/Diff3D and runs the interactive viewer.
+    """
+    try:
+        import pyvista as pv
+        import vtk
+        import diff3d
+
+        # Force interactive mode
+        pv.global_theme.interactive = True
+        
+        target_image_name = "screenshot.png"
+        
+        # --- MONKEY PATCH: Intercept show() to add callbacks ---
+        OriginalShow = pv.Plotter.show
+
+        def patched_show(self, *args, **kwargs):
+            # Define the screenshot function
+            def auto_capture(*_):
+                try:
+                    # Take screenshot (blocking=False helps performance)
+                    self.screenshot(target_image_name, return_img=False)
+                except:
+                    pass
+
+            # 1. Add Observer for Mouse Release (EndInteractionEvent)
+            if hasattr(self, 'iren') and self.iren:
+                self.iren.add_observer(vtk.vtkCommand.EndInteractionEvent, auto_capture)
+
+            # 2. Capture immediately on render
+            try:
+                self.render()
+                auto_capture()
+            except:
+                pass
+
+            return OriginalShow(self, *args, **kwargs)
+
+        pv.Plotter.show = patched_show
+        # -------------------------------------------------------
+
+        # Ensure we are in the correct directory to save the screenshot
+        os.chdir(save_dir)
+        
+        # Remove old screenshot if exists
+        if os.path.exists(target_image_name):
+            os.remove(target_image_name)
+
+        diff3d.from_files(file_a, file_b)
+        
+    except Exception as e:
+        # Write error to a log file since we have no console in windowed mode
+        with open(os.path.join(save_dir, "diff3d_error.log"), "w") as f:
+            f.write(str(e))
+        sys.exit(1)
+
+# --- GUI LOGIC ---
 class DiffPDFApp:
     def __init__(self, master):
         self.master = master
@@ -205,7 +265,7 @@ class DiffPDFApp:
         except Exception as e:
             print(f"PDF Execution Exception: {e}")
 
-        # 2. 3D STEP Diff (Auto-Screenshot Script)
+        # 2. 3D STEP Diff (Using Self-Call Logic)
         if self.check_3d_var.get():
             step_a = self.find_step_file(file_a)
             step_b = self.find_step_file(file_b)
@@ -215,10 +275,9 @@ class DiffPDFApp:
                 target_image_name = os.path.splitext(os.path.basename(output_path))[0] + ".png"
                 target_image_path = os.path.join(save_dir, target_image_name)
 
-                # Check simple existence first
+                # Check if we can actually run 3D (check imports via subprocess self-check)
                 diff3d_ok = False
                 try:
-                     # Check imports
                      subprocess.run([sys.executable, "-c", "import diff3d; import pyvista; import build123d"], 
                                     check=True, capture_output=True, 
                                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
@@ -227,80 +286,22 @@ class DiffPDFApp:
                      diff3d_ok = False
 
                 if diff3d_ok:
-                    # Simplified instructions
-                    # REMOVED: Pop-up instruction to make workflow faster
-                    
-                    # The magic script that patches PyVista behavior
-                    viewer_script = f"""
-import sys
-import os
-import pyvista as pv
-import vtk
-import diff3d
-
-# Force interactive mode
-pv.global_theme.interactive = True
-
-file_a = r"{step_a}"
-file_b = r"{step_b}"
-save_name = "screenshot.png"
-
-# --- MONKEY PATCH: Intercept show() to add callbacks ---
-OriginalShow = pv.Plotter.show
-
-def patched_show(self, *args, **kwargs):
-    # Define the screenshot function
-    def auto_capture(*_):
-        try:
-            # Take screenshot (blocking=False helps performance)
-            self.screenshot(save_name, return_img=False)
-            print("Captured.")
-        except:
-            pass
-
-    # 1. Add Observer for Mouse Release (EndInteractionEvent)
-    if hasattr(self, 'iren') and self.iren:
-        self.iren.add_observer(vtk.vtkCommand.EndInteractionEvent, auto_capture)
-
-    # 2. Capture immediately on load (after a tiny delay to ensure render)
-    # We use a timer event to fire once after 500ms
-    def initial_shot(step_id):
-        auto_capture()
-        # We don't need to repeat, but PyVista timers are often repeating. 
-        # We just let it run or could clear it. 
-        # For simplicity, one-shot call at startup is usually enough via simple call if render window is ready.
-    
-    # Attempt immediate capture (might be black if too early)
-    # Better: Render once then capture
-    try:
-        self.render()
-        auto_capture()
-    except:
-        pass
-
-    return OriginalShow(self, *args, **kwargs)
-
-pv.Plotter.show = patched_show
-# -------------------------------------------------------
-
-print("Launching diff3d viewer...")
-try:
-    diff3d.from_files(file_a, file_b)
-except Exception as e:
-    print(f"Error in 3D viewer: {{e}}")
-"""
+                    # Launch 3D viewer in background
                     def run_3d_process():
                         try:
-                            default_screenshot = os.path.join(save_dir, "screenshot.png")
-                            if os.path.exists(default_screenshot):
-                                os.remove(default_screenshot)
-
-                            # Run the python script in the save_dir so screenshot.png appears there
-                            subprocess.run([sys.executable, "-c", viewer_script], 
-                                           cwd=save_dir,
-                                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+                            # Construct the command based on execution environment
+                            if getattr(sys, 'frozen', False):
+                                # Running as EXE: Call self
+                                cmd = [sys.executable, "--3d-mode", step_a, step_b, save_dir]
+                            else:
+                                # Running as Script: Call python executable + script path
+                                script_path = os.path.abspath(sys.argv[0])
+                                cmd = [sys.executable, script_path, "--3d-mode", step_a, step_b, save_dir]
+                                
+                            subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
                             
-                            # Rename final result
+                            # Check for result 'screenshot.png'
+                            default_screenshot = os.path.join(save_dir, "screenshot.png")
                             if os.path.exists(default_screenshot):
                                 if os.path.exists(target_image_path):
                                     os.remove(target_image_path)
@@ -310,7 +311,7 @@ except Exception as e:
                                     text=f"✔ PDF & 3D Image Saved.", foreground='green'))
                             else:
                                 self.master.after(0, lambda: self.status_label.config(
-                                    text=f"✔ PDF Saved (3D: No capture).", foreground='green'))
+                                    text=f"✔ PDF Saved (3D: No screenshot).", foreground='green'))
                                 
                         except Exception as e:
                             print(f"3D Process Error: {e}")
@@ -328,6 +329,19 @@ except Exception as e:
             self.status_label.config(text=f"✘ PDF Failed.", foreground='red', font=('Segoe UI', 10, 'bold'))
 
 def main():
+    # --- INTERNAL DISPATCHER for 3D MODE ---
+    # Check if we are being called as a 3D viewer subprocess
+    # If calling as script, argv[0] is script.py, so flags start at index 1
+    # If calling as EXE, argv[0] is exe path, flags start at index 1
+    if len(sys.argv) >= 2 and sys.argv[1] == "--3d-mode":
+        if len(sys.argv) == 5:
+            file_a = sys.argv[2]
+            file_b = sys.argv[3]
+            save_dir = sys.argv[4]
+            run_3d_viewer_mode(file_a, file_b, save_dir)
+            sys.exit(0)
+    
+    # --- GUI MODE (Normal Start) ---
     if TkinterDnD:
         root = TkinterDnD.Tk()
     else:
