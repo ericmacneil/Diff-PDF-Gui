@@ -6,7 +6,8 @@ import subprocess
 import shutil
 import threading
 import time
-import difflib  # Added for string similarity matching
+import difflib
+import re # Added for revision number parsing
 
 # --- CONFIGURATION & SETUP ---
 
@@ -97,7 +98,7 @@ class DiffPDFApp:
     def __init__(self, master):
         self.master = master
         master.title("Diff-PDF GUI Wrapper")
-        master.geometry("600x600") # Increased height for new controls
+        master.geometry("600x600")
         master.resizable(False, False)
 
         self.file_a_path = tk.StringVar()
@@ -105,7 +106,6 @@ class DiffPDFApp:
         self.check_3d_var = tk.BooleanVar(value=True)
         self.check_autofill_var = tk.BooleanVar(value=True)
         
-        # Flag to prevent recursive updates during auto-fill
         self.is_internal_update = False 
 
         self.style = ttk.Style()
@@ -118,8 +118,7 @@ class DiffPDFApp:
                        background=[('active', '#8C74C2'), ('pressed', '#7E65B1')],
                        foreground=[('active', 'black'), ('pressed', 'black')])
 
-        # Smaller Swap Button Style
-        self.style.configure('Swap.TButton', font=('Segoe UI', 12))
+        self.style.configure('Control.TButton', font=('Segoe UI', 10))
 
         main_frame = ttk.Frame(master, padding="30 20 30 20")
         main_frame.pack(expand=True, fill='both')
@@ -127,26 +126,29 @@ class DiffPDFApp:
         title_label = ttk.Label(main_frame, text="PDF & 3D Difference Finder", font=('Segoe UI', 16, 'bold'))
         title_label.grid(row=0, column=0, pady=(0, 20), sticky='w')
 
-        # --- Row 1: File A ---
-        # Capture the widget returned for use in auto-fill visual feedback
+        # --- Row 1: File A (Original) ---
         self.drop_zone_a = self.create_drop_zone(main_frame, "File 1 (Original):", self.file_a_path, 1)
 
-        # --- Row 2: Swap & Auto-fill Controls ---
+        # --- Row 2: Controls ---
         controls_frame = ttk.Frame(main_frame)
         controls_frame.grid(row=2, column=0, pady=5, sticky='ew')
         
         # Swap Button
-        self.swap_btn = ttk.Button(controls_frame, text="⇅ Swap Files", command=self.swap_files, style='Swap.TButton', width=12)
-        self.swap_btn.pack(side='left', padx=(0, 20))
+        self.swap_btn = ttk.Button(controls_frame, text="⇅ Swap", command=self.swap_files, style='Control.TButton', width=8)
+        self.swap_btn.pack(side='left', padx=(0, 10))
         
+        # Clear Button
+        self.clear_btn = ttk.Button(controls_frame, text="✖ Clear", command=self.clear_files, style='Control.TButton', width=8)
+        self.clear_btn.pack(side='left', padx=(0, 20))
+
         # Auto-fill Checkbox
         self.check_autofill = ttk.Checkbutton(controls_frame, 
-                                              text="Auto-fill matching pair", 
+                                              text="Auto-fill revision pair", 
                                               variable=self.check_autofill_var,
                                               onvalue=True, offvalue=False)
         self.check_autofill.pack(side='left')
 
-        # --- Row 3: File B ---
+        # --- Row 3: File B (Comparison) ---
         self.drop_zone_b = self.create_drop_zone(main_frame, "File 2 (Comparison):", self.file_b_path, 3)
 
         # --- Row 4: 3D Checkbox ---
@@ -164,14 +166,14 @@ class DiffPDFApp:
 
         main_frame.grid_columnconfigure(0, weight=1)
 
-        # Attach listeners for auto-fill logic
-        # Pass the target widget so we can change its color on failure
-        self.file_a_path.trace_add("write", lambda *args: self.on_path_change(self.file_a_path, self.file_b_path, self.drop_zone_b))
-        self.file_b_path.trace_add("write", lambda *args: self.on_path_change(self.file_b_path, self.file_a_path, self.drop_zone_a))
+        # Attach listeners
+        # When A changes -> Try to fill B (Next Revision)
+        self.file_a_path.trace_add("write", lambda *args: self.on_path_change(self.file_a_path, self.file_b_path, self.drop_zone_b, mode="next"))
+        # When B changes -> Try to fill A (Previous Revision)
+        self.file_b_path.trace_add("write", lambda *args: self.on_path_change(self.file_b_path, self.file_a_path, self.drop_zone_a, mode="prev"))
 
     def swap_files(self):
-        """Swaps the content of File A and File B."""
-        self.is_internal_update = True # Prevent auto-fill from triggering during swap
+        self.is_internal_update = True 
         val_a = self.file_a_path.get()
         val_b = self.file_b_path.get()
         self.file_a_path.set(val_b)
@@ -179,8 +181,46 @@ class DiffPDFApp:
         self.is_internal_update = False
         self.status_label.config(text="Files swapped.", foreground='#333')
 
-    def on_path_change(self, changed_var, target_var, target_widget):
-        """Attempts to find a matching file in the same directory."""
+        # Retry auto-fill after swap if one side is empty
+        # If A has file and B is empty, treat A as base and find NEXT revision for B
+        if self.file_a_path.get() and not self.file_b_path.get():
+            self.on_path_change(self.file_a_path, self.file_b_path, self.drop_zone_b, mode="next")
+        # If B has file and A is empty, treat B as base and find PREV revision for A
+        elif self.file_b_path.get() and not self.file_a_path.get():
+            self.on_path_change(self.file_b_path, self.file_a_path, self.drop_zone_a, mode="prev")
+
+    def clear_files(self):
+        self.is_internal_update = True
+        self.file_a_path.set("")
+        self.file_b_path.set("")
+        self.is_internal_update = False
+        # Reset drop zones visual state
+        self.drop_zone_a.config(text="☁  Drag & Drop PDF Here", bg="#E8EAF6", fg="#5C6BC0", font=('Segoe UI', 11))
+        self.drop_zone_b.config(text="☁  Drag & Drop PDF Here", bg="#E8EAF6", fg="#5C6BC0", font=('Segoe UI', 11))
+        self.status_label.config(text="Cleared.", foreground='#333')
+
+    def extract_revision(self, filename):
+        """Finds a revision number in a filename. Returns (prefix, separator, number, suffix)."""
+        # Priority 1: Explicit 'Rev' or 'v' (greedy start ensures we find the LAST instance)
+        # matches "Part_Rev1_..." -> "Part_", "Rev", "1", "_..."
+        match = re.search(r'(.*)(Rev|v)(\d+)(.*)', filename, re.IGNORECASE)
+        if match:
+            return match.groups()
+            
+        # Priority 2: Underscore or Hyphen separator (greedy start)
+        # matches "Part-02" -> "Part", "-", "02", ""
+        match = re.search(r'(.*)(_|-)(\d+)(.*)', filename, re.IGNORECASE)
+        if match:
+            return match.groups()
+            
+        return None
+
+    def on_path_change(self, changed_var, target_var, target_widget, mode="next"):
+        """
+        Auto-fills the target path based on revision logic.
+        mode="next": Looks for revision > current (For File 1 -> File 2)
+        mode="prev": Looks for revision < current (For File 2 -> File 1)
+        """
         if not self.check_autofill_var.get() or self.is_internal_update:
             return
 
@@ -188,37 +228,71 @@ class DiffPDFApp:
         if not current_path or not os.path.exists(current_path):
             return
 
-        # If the target is already filled, don't overwrite it
         if target_var.get():
             return
 
         try:
             directory = os.path.dirname(current_path)
             filename = os.path.basename(current_path)
-            ext = os.path.splitext(filename)[1].lower()
+            name_no_ext, ext = os.path.splitext(filename)
 
-            # Find all other files with same extension in directory
-            candidates = [f for f in os.listdir(directory) 
-                          if f.lower().endswith(ext) and f != filename]
-
-            found = False
-            if candidates:
-                # Use difflib to find the most similar filename (e.g. finding Rev2 for Rev1)
-                best_match = difflib.get_close_matches(filename, candidates, n=1, cutoff=0.6)
-                
-                if best_match:
-                    match_path = os.path.join(directory, best_match[0])
-                    
-                    self.is_internal_update = True # Lock to prevent infinite recursion
-                    target_var.set(match_path)
-                    self.is_internal_update = False
-                    
-                    self.status_label.config(text=f"Auto-filled: {best_match[0]}", foreground='#00695C')
-                    found = True
+            candidates = [f for f in os.listdir(directory) if f.lower().endswith(ext.lower()) and f != filename]
             
-            if not found:
-                # Set target widget to RED to indicate no match found
-                target_widget.config(bg="#FFEBEE", fg="#D32F2F", text="✘ No matching file found")
+            best_match_file = None
+            
+            # 1. Try smart revision matching first
+            rev_info = self.extract_revision(name_no_ext)
+            
+            if rev_info:
+                prefix, sep, num_str, suffix = rev_info
+                try:
+                    current_rev = int(num_str)
+                    
+                    valid_candidates = []
+                    for cand in candidates:
+                        cand_name = os.path.splitext(cand)[0]
+                        cand_rev_info = self.extract_revision(cand_name)
+                        if cand_rev_info:
+                            c_prefix, c_sep, c_num_str, c_suffix = cand_rev_info
+                            # Check prefix matches (ignoring the revision number part)
+                            if c_prefix.lower() == prefix.lower(): 
+                                try:
+                                    c_rev = int(c_num_str)
+                                    valid_candidates.append((c_rev, cand))
+                                except:
+                                    pass
+
+                    valid_candidates.sort(key=lambda x: x[0])
+                    
+                    if mode == "next":
+                        # Find smallest revision > current_rev
+                        potential = [x for x in valid_candidates if x[0] > current_rev]
+                        if potential: best_match_file = potential[0][1]
+                            
+                    elif mode == "prev":
+                        # Find largest revision < current_rev
+                        potential = [x for x in valid_candidates if x[0] < current_rev]
+                        if potential: best_match_file = potential[-1][1]
+
+                except Exception as e:
+                    print(f"Revision parse error: {e}")
+
+            # 2. Fallback only if NO revision info was found in source (avoids matching wrong revs)
+            if not best_match_file and candidates and not rev_info:
+                matches = difflib.get_close_matches(filename, candidates, n=1, cutoff=0.6)
+                if matches:
+                    best_match_file = matches[0]
+
+            if best_match_file:
+                match_path = os.path.join(directory, best_match_file)
+                self.is_internal_update = True 
+                target_var.set(match_path)
+                self.is_internal_update = False
+                self.status_label.config(text=f"Auto-filled: {best_match_file}", foreground='#00695C')
+                # Reset visual state
+                target_widget.config(bg="#E0F2F1", fg="#00695C") # Greenish for success
+            else:
+                target_widget.config(bg="#FFEBEE", fg="#D32F2F", text="✘ No matching revision found")
                 self.status_label.config(text="No matching pair found for auto-fill.", foreground='#D32F2F')
 
         except Exception as e:
@@ -276,7 +350,6 @@ class DiffPDFApp:
             self.status_label.config(text="⚠️ Please select both PDF files first.", foreground='red')
             return
         
-        # Calculate default output filename: [File 2 Name]-Redline.pdf
         default_name = "diff_result.pdf"
         if file_b:
             try:
